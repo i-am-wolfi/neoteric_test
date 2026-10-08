@@ -1,0 +1,91 @@
+name: Neoteric marble bka squeezed
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    steps:
+      - name: Maximize space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 20480
+          swap-size-mb: 16384
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Deps + repo + Java 17
+        run: |
+          df -h
+          sudo apt-get update -y
+          sudo apt-get install -y git git-lfs python3 curl aria2 ccache rsync zip
+          git lfs install
+          sudo curl --create-dirs -L -o /usr/local/bin/repo -O -L https://storage.googleapis.com/git-repo-downloads/repo
+          sudo chmod a+rx /usr/local/bin/repo
+          mkdir -p /mnt/rom /mnt/ccache
+          df -h
+          java -version || true
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: /mnt/ccache
+          key: ccache-bka-marble-${github.run_number}
+          restore-keys: |
+            ccache-bka-marble-
+
+      - name: Sync bka + marble.xml (shallow)
+        run: |
+          cd /mnt/rom
+          repo init --depth=1 -u https://github.com/neoteric-shadedark/android_manifest -b bka --git-lfs -g all
+          repo sync -c --force-sync --optimized-fetch --no-tags --no-clone-bundle --prune -j$(nproc --all)
+          df -h
+          du -sh /mnt/rom --exclude=out 2>/dev/null | head
+          # squeeze extra: apaga objetos duplicados do repo, source continua buildavel
+          rm -rf .repo/projects .repo/project-objects || true
+          df -h
+
+      - name: Build neoteric_marble
+        run: |
+          cd /mnt/rom
+          export USE_CCACHE=1
+          export CCACHE_DIR=/mnt/ccache
+          export CCACHE_COMPRESS=1
+          export CCACHE_MAXSIZE=5G
+          ccache -M 5G || true
+          ccache -z || true
+          source build/envsetup.sh
+          lunch neoteric_marble-userdebug || lunch marble-userdebug
+          mka bacon -j$(nproc --all)
+          ccache -s || true
+          ls -lh out/target/product/marble/*.zip
+
+      - name: Upload zip
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neoteric-marble
+          path: /mnt/rom/out/target/product/marble/*.zip
+          if-no-files-found: error
+
+      - name: Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: marble-bka-${{ github.run_number }}
+          files: /mnt/rom/out/target/product/marble/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

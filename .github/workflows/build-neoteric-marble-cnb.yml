@@ -1,0 +1,111 @@
+name: Neoteric marble cnb squeezed
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    steps:
+      - name: Maximize space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 20480
+          swap-size-mb: 16384
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Deps + repo
+        run: |
+          df -h
+          sudo apt-get update -y
+          sudo apt-get install -y git git-lfs python3 curl aria2 ccache rsync zip
+          git lfs install
+          sudo curl --create-dirs -L -o /usr/local/bin/repo -O -L https://storage.googleapis.com/git-repo-downloads/repo
+          sudo chmod a+rx /usr/local/bin/repo
+          mkdir -p /mnt/rom /mnt/ccache
+          df -h
+
+      - name: Setup Java 21 (Android 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: /mnt/ccache
+          key: ccache-cnb-marble-${github.run_number}
+          restore-keys: |
+            ccache-cnb-marble-
+
+      - name: Sync cnb shallow (sem OTA/certs)
+        run: |
+          cd /mnt/rom
+          repo init --depth=1 -u https://github.com/neoteric-shadedark/android_manifest -b cnb --git-lfs -g default
+          mkdir -p .repo/local_manifests
+          cat > .repo/local_manifests/marble-cnb.xml <<'XML'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <remote name="shadedark-cnb" fetch="https://github.com/neoteric-shadedark" revision="cnb" />
+            <remote name="shadedark-bka8450" fetch="https://github.com/neoteric-shadedark" revision="bka-8450" />
+            <project path="device/xiaomi/marble" name="android_device_xiaomi_marble" remote="shadedark-cnb" revision="cnb" clone-depth="1" />
+            <project path="device/xiaomi/sm8450-common" name="android_device_xiaomi_sm8450-common" remote="shadedark-cnb" revision="cnb" clone-depth="1" />
+            <project path="device/xiaomi/marble-kernel" name="android_device_xiaomi_marble-kernel" remote="shadedark-cnb" revision="cnb" clone-depth="1" />
+            <project path="vendor/xiaomi/marble" name="proprietary_vendor_xiaomi_marble" remote="shadedark-cnb" revision="cnb" clone-depth="1" />
+            <project path="vendor/xiaomi/sm8450-common" name="proprietary_vendor_xiaomi_sm8450-common" remote="shadedark-cnb" revision="cnb" clone-depth="1" />
+            <project path="vendor/xiaomi/marble-firmware" name="proprietary_vendor_xiaomi_marble-firmware" remote="shadedark-cnb" revision="cnb" clone-depth="1" />
+            <project path="vendor/xiaomi/camera" name="proprietary_vendor_xiaomi_camera" remote="shadedark-cnb" revision="cnb-marble" clone-depth="1" />
+            <project path="hardware/xiaomi" name="android_hardware_xiaomi" remote="shadedark-cnb" revision="cnb" clone-depth="1" />
+            <project path="hardware/qcom/display" name="android_hardware_qcom_display" remote="shadedark-cnb" revision="cnb-8450" clone-depth="1" />
+            <project path="vendor/qcom/opensource/audio-hal/primary-hal" name="android_hardware_qcom_audio" remote="shadedark-cnb" revision="cnb-8450" clone-depth="1" />
+            <!-- sem cnb ainda: usa bka-8450 como fallback -->
+            <project path="hardware/qcom/gps" name="hardware_qcom_gps" remote="shadedark-bka8450" revision="bka-8450" clone-depth="1" />
+            <project path="hardware/qcom/media" name="hardware_qcom_media" remote="shadedark-bka8450" revision="bka-8450" clone-depth="1" />
+            <project path="vendor/qcom/opensource/agm" name="vendor_qcom_opensource_agm" remote="shadedark-bka8450" revision="bka-8450" clone-depth="1" />
+            <project path="vendor/qcom/opensource/pal" name="vendor_qcom_opensource_arpal-lx" remote="shadedark-bka8450" revision="bka-8450" clone-depth="1" />
+          </manifest>
+          XML
+          repo sync -c --force-sync --optimized-fetch --no-tags --no-clone-bundle --prune -j$(nproc --all)
+          df -h
+          rm -rf .repo/projects .repo/project-objects || true
+          df -h
+
+      - name: Build neoteric_marble cnb
+        run: |
+          cd /mnt/rom
+          export USE_CCACHE=1
+          export CCACHE_DIR=/mnt/ccache
+          export CCACHE_COMPRESS=1
+          export CCACHE_MAXSIZE=5G
+          ccache -M 5G || true
+          ccache -z || true
+          source build/envsetup.sh
+          lunch neoteric_marble-userdebug || lunch marble-userdebug
+          mka bacon -j$(nproc --all)
+          ccache -s || true
+          ls -lh out/target/product/marble/*.zip
+
+      - name: Upload zip
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neoteric-marble-cnb
+          path: /mnt/rom/out/target/product/marble/*.zip
+          if-no-files-found: error
+
+      - name: Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: marble-cnb-${{ github.run_number }}
+          files: /mnt/rom/out/target/product/marble/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
